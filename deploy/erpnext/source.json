@@ -1,0 +1,10 @@
+{
+  "files": [
+    "compose.yaml",
+    "overrides/compose.mariadb.yaml",
+    "overrides/compose.redis.yaml",
+    "LICENSE"
+  ],
+  "commit": "c74f28db98fde650612d02a5353177a9c2df4f34",
+  "repository": "https://github.com/frappe/frappe_docker"
+}

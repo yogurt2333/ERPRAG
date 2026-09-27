@@ -1,0 +1,29 @@
+services:
+  frontend:
+    environment:
+      FRAPPE_SITE_NAME_HEADER: erprag.localhost
+    ports:
+      - "127.0.0.1:${ERP_HTTP_PORT:-8080}:8080"
+
+  create-site:
+    image: frappe/erpnext:${ERPNEXT_VERSION:?Set ERPNEXT_VERSION}
+    platform: linux/amd64
+    profiles: [setup]
+    restart: "no"
+    entrypoint: [bash, -ec]
+    command:
+      - |
+        if [ -f sites/erprag.localhost/site_config.json ]; then
+          bench --site erprag.localhost list-apps | grep -q erpnext || { echo 'Existing site is incomplete; inspect before retrying'; exit 1; }
+          echo 'ERPNext site already exists';
+          exit 0;
+        fi
+        bench new-site erprag.localhost --db-root-username root --db-root-password "$$DB_PASSWORD" --admin-password "$$ERP_ADMIN_PASSWORD" --mariadb-user-host-login-scope='%' --install-app erpnext --set-default
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD:?Set a database password}
+      ERP_ADMIN_PASSWORD: ${ERP_ADMIN_PASSWORD:?Set an administrator password}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
