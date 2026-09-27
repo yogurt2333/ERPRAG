@@ -4,12 +4,22 @@
 
 **Blocked by:** 02 — Customer order and delivery create receivable and gross profit; 03 — Receipts and payments allocate open obligations.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Posted stock or settlement records cannot be overwritten or physically deleted through public operations.
-- [ ] A purchase mistake can be reversed with exact stock, cost and payable effects.
-- [ ] A sales mistake can be reversed with exact stock, receivable and gross-profit effects.
-- [ ] Receipt/payment allocation can be reversed without losing the original allocation history.
-- [ ] Reversal chains retain origin links, actor, channel, timestamp and reason.
-- [ ] Repeating a reversal confirmation is idempotent.
-- [ ] Failure during reversal leaves both original balances and correction state unchanged.
+- [x] Posted stock or settlement records cannot be overwritten or physically deleted through public operations.
+- [x] A purchase mistake can be reversed with exact stock, cost and payable effects.
+- [x] A sales mistake can be reversed with exact stock, receivable and gross-profit effects.
+- [x] Receipt/payment allocation can be reversed without losing the original allocation history.
+- [x] Reversal chains retain origin links, actor, channel, timestamp and reason.
+- [x] Repeating a reversal confirmation is idempotent.
+- [x] Failure during reversal leaves both original balances and correction state unchanged.
+
+## Verification
+
+Implemented schema 5 append-only linked corrections, exact original-cost sales reversal,
+purchase valuation guards, settlement allocation/excess reversal, durable idempotency
+and atomic rollback. See `docs/lean-erp/REVERSALS.md` and `test/erp-reversal.test.ts`.
+
+Validation: TypeScript strict check and complete test suite passed.
+Scope: full-record corrections through local service; physical/partial returns and
+Web/Hermes draft/authentication adapters remain separate tickets.

@@ -6,7 +6,7 @@ export function openDatabase(path: string): DatabaseSync {
     db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     db.exec('BEGIN IMMEDIATE');
     const version = db.prepare('PRAGMA user_version').get()!.user_version;
-    if (![0, 1, 2, 3].includes(Number(version))) throw new Error(`Unsupported ERP schema version: ${version}`);
+    if (![0, 1, 2, 3, 4, 5].includes(Number(version))) throw new Error(`Unsupported ERP schema version: ${version}`);
     if (version === 0) db.exec(`
       CREATE TABLE masters (
         id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('product','supplier','warehouse')),
@@ -74,6 +74,31 @@ export function openDatabase(path: string): DatabaseSync {
       ) STRICT;
       CREATE INDEX allocation_obligation ON settlement_allocations(obligation_id);
       PRAGMA user_version = 3;
+    `);
+    if (Number(version) < 4) db.exec(`
+      CREATE TABLE product_details (
+        product_id TEXT PRIMARY KEY REFERENCES masters(id), revision INTEGER NOT NULL, document TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE pack_versions (
+        product_id TEXT NOT NULL REFERENCES masters(id), unit TEXT NOT NULL, version INTEGER NOT NULL,
+        document TEXT NOT NULL, PRIMARY KEY(product_id, unit, version)
+      ) STRICT;
+      CREATE TABLE product_followups (
+        product_id TEXT PRIMARY KEY REFERENCES masters(id), missing_fields TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('open','resolved'))
+      ) STRICT;
+      INSERT INTO product_details SELECT id, 1, '{"aliases":[],"specification":null,"barcode":null,"shelfLifeDays":null}' FROM masters WHERE kind = 'product';
+      INSERT INTO product_followups SELECT id, '["specification","shelfLifeDays","packUnits"]', 'open' FROM masters WHERE kind = 'product';
+      PRAGMA user_version = 4;
+    `);
+    if (Number(version) < 5) db.exec(`
+      CREATE TABLE reversals (
+        id TEXT PRIMARY KEY REFERENCES operations(id),
+        origin_id TEXT NOT NULL REFERENCES operations(id),
+        kind TEXT NOT NULL CHECK(kind IN ('purchase','sale','settlement')),
+        document TEXT NOT NULL, UNIQUE(origin_id, kind)
+      ) STRICT;
+      PRAGMA user_version = 5;
     `);
     db.exec('COMMIT');
     return db;

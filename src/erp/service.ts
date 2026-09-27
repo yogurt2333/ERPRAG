@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Type, type Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { openDatabase } from './database.ts';
-import { add, compare, decimal, divide, multiply, subtract, ratio, zero, type Rational } from './exact.ts';
+import { add, negate, compare, decimal, divide, multiply, subtract, ratio, zero, type Rational } from './exact.ts';
 
 const text = Type.String({ minLength: 1, maxLength: 200, pattern: '\\S' });
 const object = <T extends Record<string, import('@sinclair/typebox').TSchema>>(properties: T) =>
@@ -15,6 +15,13 @@ export type Confirmation = Static<typeof confirmationSchema>;
 const productSchema = object({ name: text, stockUnit: text });
 const namedSchema = object({ name: text });
 const dueDateSchema = Type.String({ pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' });
+const detailsSchema = object({ productId: text, expectedRevision: Type.Integer({ minimum: 1 }),
+  aliases: Type.Array(text, { maxItems: 100, uniqueItems: true }),
+  specification: Type.Union([text, Type.Null()]), barcode: Type.Union([text, Type.Null()]),
+  shelfLifeDays: Type.Union([Type.Integer({ minimum: 1, maximum: 36500 }), Type.Null()]) });
+const positiveInteger = Type.String({ pattern: '^[1-9][0-9]{0,17}$' });
+const packSchema = object({ productId: text, unit: text, expectedVersion: Type.Integer({ minimum: 0 }),
+  stockUnits: object({ numerator: positiveInteger, denominator: positiveInteger }) });
 const receiptSchema = object({
   supplierId: text, warehouseId: text, dueDate: Type.Optional(dueDateSchema),
   lines: Type.Array(object({
@@ -23,7 +30,16 @@ const receiptSchema = object({
     amountCents: Type.String({ pattern: '^(0|[1-9][0-9]{0,17})$' })
   }), { minItems: 1, maxItems: 500 })
 });
-export type PurchaseReceiptInput = Static<typeof receiptSchema>;
+const purchaseSchema = object({ ...receiptSchema.properties, lines: Type.Array(object({
+  ...receiptSchema.properties.lines.items.properties,
+  packVersion: Type.Optional(Type.Integer({ minimum: 1 })),
+  earliestProductionDate: Type.Optional(dueDateSchema)
+}), { minItems: 1, maxItems: 500 }) });
+export type PurchaseReceiptInput = Static<typeof purchaseSchema>;
+export interface ProductDetails { aliases: string[]; specification: string | null; barcode: string | null; shelfLifeDays: number | null }
+export interface PackVersion { id: string; productId: string; unit: string; version: number; stockUnits: Rational }
+export interface ReceiptLineSnapshot { stockUnit: string; stockQuantity: Rational; conversion: Rational;
+  shelfLifeDays: number | null; managedExpiryDate: string | null; expiryBasis: 'operational_estimate' }
 const orderSchema = object({ customerId: text, warehouseId: text, lines: receiptSchema.properties.lines });
 const orderChangeSchema = object({ orderId: text, expectedRevision: Type.Integer({ minimum: 1 }), order: orderSchema });
 const cancelSchema = object({ orderId: text, expectedRevision: Type.Integer({ minimum: 1 }) });
@@ -66,9 +82,20 @@ export interface PostedDelivery {
 }
 export interface Master { id: string; name: string; kind: 'product' | 'supplier' | 'warehouse' | 'customer'; stockUnit: string | null }
 export interface PostedReceipt extends PurchaseReceiptInput {
+  lines: (PurchaseReceiptInput['lines'][number] & Partial<ReceiptLineSnapshot>)[];
   id: string; status: 'posted'; currency: 'CNY'; totalCents: string; postedAt: string;
 }
-export interface AuditEvidence extends Confirmation { action: string; recordId: string; recordedAt: string; allocationDecision?: unknown }
+const reversalSchema = object({ originId: text, reason: text,
+  kind: Type.Union([Type.Literal('purchase'), Type.Literal('sale'), Type.Literal('settlement')]) });
+export interface ReversalProposal extends Static<typeof reversalSchema> {
+  stock: { productId: string; warehouseId: string; quantity: Rational; valueCents: Rational }[];
+  obligationCents: string; cashCents: string; excessCents: string;
+  allocations: Allocation[]; revenueCents: string; costCents: Rational; grossProfitCents: Rational;
+}
+export interface PostedReversal extends ReversalProposal {
+  id: string; actorId: string; channel: Confirmation['channel']; confirmationId: string; postedAt: string;
+}
+export interface AuditEvidence extends Confirmation { action: string; recordId: string; recordedAt: string; allocationDecision?: unknown; reversalDecision?: unknown }
 export class BusinessError extends Error {
   readonly code: 'invalid_input' | 'not_found' | 'idempotency_conflict' | 'busy' | 'conflict' | 'insufficient_stock';
   constructor(code: BusinessError['code'], message: string) {
@@ -122,6 +149,11 @@ export class ErpService {
       const master: Master = { id: randomUUID(), kind, name, stockUnit };
       if (kind === 'customer') this.#db.prepare('INSERT INTO customers VALUES (?, ?)').run(master.id, name);
       else this.#db.prepare('INSERT INTO masters VALUES (?, ?, ?, ?)').run(master.id, kind, name, stockUnit);
+      if (kind === 'product') {
+        this.#db.prepare('INSERT INTO product_details VALUES (?, 1, ?)').run(master.id,
+          JSON.stringify({ aliases: [], specification: null, barcode: null, shelfLifeDays: null }));
+        this.#refreshProductFollowup(master.id);
+      }
       return master;
     });
   }
@@ -142,26 +174,113 @@ export class ErpService {
     return row as unknown as Master;
   }
 
+  getProduct(id: string): Master & ProductDetails & { revision: number; provisional: boolean } {
+    const master = this.#requireMaster(id, 'product');
+    const row = this.#db.prepare('SELECT revision, document FROM product_details WHERE product_id = ?').get(id)!;
+    const details = JSON.parse(row.document as string) as ProductDetails;
+    const followup = this.#db.prepare('SELECT status FROM product_followups WHERE product_id = ?').get(id);
+    return { ...master, ...details, revision: Number(row.revision), provisional: followup?.status === 'open' };
+  }
+  updateProductDetails(raw: unknown, confirmation: unknown): ReturnType<ErpService['getProduct']> {
+    const input = validate(detailsSchema, raw);
+    return this.#post('update_product_details', input, confirmation, () => {
+      const previous = this.getProduct(input.productId);
+      if (previous.revision !== input.expectedRevision) throw new BusinessError('conflict', 'Product changed; refresh before confirming');
+      const { productId, expectedRevision, ...details } = input;
+      this.#db.prepare('UPDATE product_details SET revision = ?, document = ? WHERE product_id = ?')
+        .run(expectedRevision + 1, JSON.stringify(details), productId);
+      this.#refreshProductFollowup(productId);
+      return this.getProduct(productId);
+    });
+  }
+  listPackVersions(productId: string): PackVersion[] {
+    this.#requireMaster(productId, 'product');
+    return this.#db.prepare('SELECT document FROM pack_versions WHERE product_id = ? ORDER BY unit, version').all(productId)
+      .map(row => JSON.parse(row.document as string) as PackVersion);
+  }
+  definePackUnit(raw: unknown, confirmation: unknown): PackVersion {
+    const input = validate(packSchema, raw);
+    return this.#post('define_pack_unit', input, confirmation, context => {
+      const product = this.#requireMaster(input.productId, 'product');
+      if (product.stockUnit === input.unit) throw new BusinessError('invalid_input', 'Cannot redefine the stock unit');
+      const latest = this.listPackVersions(input.productId).filter(p => p.unit === input.unit).at(-1)?.version ?? 0;
+      if (latest !== input.expectedVersion) throw new BusinessError('conflict', 'Pack changed; refresh before confirming');
+      const pack = { id: context.operationId, productId: input.productId, unit: input.unit, version: latest + 1,
+        stockUnits: ratio(BigInt(input.stockUnits.numerator), BigInt(input.stockUnits.denominator)) };
+      this.#db.prepare('INSERT INTO pack_versions VALUES (?, ?, ?, ?)').run(pack.productId, pack.unit, pack.version, JSON.stringify(pack));
+      this.#refreshProductFollowup(pack.productId);
+      return pack;
+    });
+  }
+  #refreshProductFollowup(productId: string): void {
+    const row = this.#db.prepare('SELECT document FROM product_details WHERE product_id = ?').get(productId)!;
+    const details = JSON.parse(row.document as string) as ProductDetails;
+    const missing = [ ...(details.specification === null ? ['specification'] : []),
+      ...(details.shelfLifeDays === null ? ['shelfLifeDays'] : []),
+      ...(this.listPackVersions(productId).length === 0 ? ['packUnits'] : []) ];
+    this.#db.prepare(`INSERT INTO product_followups VALUES (?, ?, ?)
+      ON CONFLICT(product_id) DO UPDATE SET missing_fields = excluded.missing_fields, status = excluded.status`)
+      .run(productId, JSON.stringify(missing), missing.length ? 'open' : 'resolved');
+  }
+  listProductFollowups(): { productId: string; missingFields: string[]; status: 'open' | 'resolved' }[] {
+    return this.#db.prepare('SELECT * FROM product_followups ORDER BY product_id').all().map(row => ({
+      productId: row.product_id as string, missingFields: JSON.parse(row.missing_fields as string) as string[],
+      status: row.status as 'open' | 'resolved' }));
+  }
+  listManagedExpiry(): { receiptId: string; lineIndex: number; productId: string; warehouseId: string;
+    earliestProductionDate: string | null; shelfLifeDays: number | null; managedExpiryDate: string | null;
+    basis: 'operational_estimate' }[] {
+    return this.listPurchaseReceipts().filter(r => !this.#isReversed(r.id, 'purchase')).flatMap(receipt => receipt.lines.map((line, lineIndex) => ({
+      receiptId: receipt.id, lineIndex, productId: line.productId, warehouseId: receipt.warehouseId,
+      earliestProductionDate: line.earliestProductionDate ?? null, shelfLifeDays: line.shelfLifeDays ?? null,
+      managedExpiryDate: line.managedExpiryDate ?? null, basis: 'operational_estimate' as const })));
+  }
+  summarizeManagedExpiry(throughDate: string): { basis: 'operational_estimate'; throughDate: string;
+    receiptLinesDue: number; receiptLinesUnknown: number } {
+    validate(dueDateSchema, throughDate); validateDueDate(throughDate);
+    const lines = this.listManagedExpiry();
+    return { basis: 'operational_estimate', throughDate,
+      receiptLinesDue: lines.filter(line => line.managedExpiryDate !== null && line.managedExpiryDate <= throughDate).length,
+      receiptLinesUnknown: lines.filter(line => line.managedExpiryDate === null).length };
+  }
+
   confirmPurchaseReceipt(raw: unknown, confirmation: unknown): PostedReceipt {
-    const input = validate(receiptSchema, raw);
+    const input = validate(purchaseSchema, raw);
     validateDueDate(input.dueDate);
     for (const line of input.lines) if (BigInt(decimal(line.quantity).numerator) <= 0n)
       throw new BusinessError('invalid_input', 'Receipt quantity must be positive');
     return this.#post('purchase_receipt', input, confirmation, (context, postedAt) => {
       this.#requireMaster(input.supplierId, 'supplier');
       this.#requireMaster(input.warehouseId, 'warehouse');
-      for (const line of input.lines) {
-        if (this.#requireMaster(line.productId, 'product').stockUnit !== line.unit)
-          throw new BusinessError('invalid_input', 'Only the exact stock unit is supported; pack conversion is not yet available');
-      }
-      const receipt: PostedReceipt = { ...input, id: context.operationId, status: 'posted', currency: 'CNY', postedAt,
+      const lines = input.lines.map(line => {
+        const product = this.getProduct(line.productId);
+        let conversion = ratio(1n);
+        if (line.unit === product.stockUnit) {
+          if (line.packVersion !== undefined) throw new BusinessError('invalid_input', 'Stock units have no pack version');
+        } else {
+          const pack = this.listPackVersions(line.productId).find(p => p.unit === line.unit && p.version === line.packVersion);
+          if (!pack) throw new BusinessError('invalid_input', 'An explicit known pack version is required');
+          conversion = pack.stockUnits;
+        }
+        validateDueDate(line.earliestProductionDate);
+        let managedExpiryDate: string | null = null;
+        if (line.earliestProductionDate && product.shelfLifeDays !== null) {
+          const date = new Date(line.earliestProductionDate);
+          date.setUTCDate(date.getUTCDate() + product.shelfLifeDays);
+          managedExpiryDate = date.toISOString().slice(0, 10);
+          if (!/^[0-9]{4}-/.test(managedExpiryDate)) throw new BusinessError('invalid_input', 'Expiry date exceeds supported calendar');
+        }
+        return { ...line, stockUnit: product.stockUnit!, stockQuantity: multiply(decimal(line.quantity), conversion),
+          conversion, shelfLifeDays: product.shelfLifeDays, managedExpiryDate, expiryBasis: 'operational_estimate' as const };
+      });
+      const receipt: PostedReceipt = { ...input, lines, id: context.operationId, status: 'posted', currency: 'CNY', postedAt,
         totalCents: String(input.lines.reduce((sum, line) => sum + BigInt(line.amountCents), 0n)) };
       return receipt;
     }, receipt => {
       this.#db.prepare('INSERT INTO receipts VALUES (?, ?, ?, ?)')
         .run(receipt.id, receipt.supplierId, receipt.warehouseId, JSON.stringify(receipt));
       for (const [index, line] of receipt.lines.entries()) this.#db.prepare('INSERT INTO stock_ledger VALUES (?, ?, ?, ?, ?, ?)')
-        .run(receipt.id, index, line.productId, receipt.warehouseId, JSON.stringify(decimal(line.quantity)), line.amountCents);
+        .run(receipt.id, index, line.productId, receipt.warehouseId, JSON.stringify(line.stockQuantity!), line.amountCents);
       this.#db.prepare('INSERT INTO payable_ledger VALUES (?, ?, ?)').run(receipt.id, receipt.supplierId, receipt.totalCents);
     });
   }
@@ -220,7 +339,7 @@ export class ErpService {
     lines: { orderLineIndex: number; delivered: Rational; backorder: Rational }[] } {
     const order = this.getSalesOrder(id);
     if (!order) throw new BusinessError('not_found', 'Unknown sales order');
-    const deliveries = this.listDeliveries(id);
+    const deliveries = this.listDeliveries(id).filter(d => !this.#isReversed(d.id, 'sale'));
     const lines = order.lines.map((line, orderLineIndex) => {
       const delivered = deliveries.flatMap(d => d.lines).filter(l => l.orderLineIndex === orderLineIndex)
         .reduce((sum, l) => add(sum, decimal(l.quantity)), zero());
@@ -280,12 +399,12 @@ export class ErpService {
     const rows = customerId === undefined ? this.#db.prepare('SELECT * FROM receivable_ledger ORDER BY rowid').all()
       : this.#db.prepare('SELECT * FROM receivable_ledger WHERE customer_id = ? ORDER BY rowid').all(customerId);
     for (const row of rows) row.amount_cents = String(BigInt(row.amount_cents as string) - this.#allocated(row.delivery_id as string));
-    return rows.filter(row => BigInt(row.amount_cents as string) > 0n).map(row => ({ deliveryId: row.delivery_id as string,
+    return rows.filter(row => !this.#isReversed(row.delivery_id as string, 'sale') && BigInt(row.amount_cents as string) > 0n).map(row => ({ deliveryId: row.delivery_id as string,
       customerId: row.customer_id as string, openCents: row.amount_cents as string, currency: 'CNY' }));
   }
 
   #allocated(obligationId: string): bigint {
-    return this.#db.prepare('SELECT amount_cents FROM settlement_allocations WHERE obligation_id = ?').all(obligationId)
+    return this.#db.prepare(`SELECT amount_cents FROM settlement_allocations a WHERE obligation_id = ? AND NOT EXISTS (SELECT 1 FROM reversals r WHERE r.origin_id = a.settlement_id AND r.kind = 'settlement')`).all(obligationId)
       .reduce((sum, row) => sum + BigInt(row.amount_cents as string), 0n);
   }
   listOpenObligations(raw: unknown): OpenObligation[] {
@@ -358,7 +477,7 @@ export class ErpService {
   getAdvanceBalance(raw: unknown): { amountCents: string; currency: 'CNY' } {
     const input = validate(object({ kind: settlementSchema.properties.kind, partyId: text }), raw);
     this.#requireMaster(input.partyId, input.kind === 'customer_receipt' ? 'customer' : 'supplier');
-    const rows = this.#db.prepare('SELECT document FROM settlements WHERE kind = ? AND party_id = ?').all(input.kind, input.partyId);
+    const rows = this.#db.prepare(`SELECT document FROM settlements s WHERE kind = ? AND party_id = ? AND NOT EXISTS (SELECT 1 FROM reversals r WHERE r.origin_id = s.id AND r.kind = 'settlement')`).all(input.kind, input.partyId);
     return { amountCents: String(rows.reduce((sum, row) => sum + BigInt((JSON.parse(row.document as string) as PostedSettlement).excessCents), 0n)), currency: 'CNY' };
   }
   /** Cash-on-delivery explicitly settles this delivery; old debts remain unchanged. */
@@ -389,6 +508,70 @@ export class ErpService {
     }, result => { this.#saveDelivery(result.delivery); this.#saveSettlement(result.settlement); });
   }
 
+  #isReversed(originId: string, kind: ReversalProposal['kind']): boolean {
+    return !!this.#db.prepare('SELECT 1 FROM reversals WHERE origin_id = ? AND kind = ?').get(originId, kind);
+  }
+  listReversals(): PostedReversal[] {
+    return this.#db.prepare('SELECT document FROM reversals ORDER BY rowid').all()
+      .map(row => JSON.parse(row.document as string) as PostedReversal);
+  }
+  /** Full correction of an original record. Physical/partial returns are a separate operation. */
+  previewReversal(raw: unknown): ReversalProposal {
+    const input = validate(reversalSchema, raw);
+    if (this.#isReversed(input.originId, input.kind)) throw new BusinessError('conflict', 'Record already reversed');
+    const result: ReversalProposal = { ...input, stock: [], obligationCents: '0', cashCents: '0', excessCents: '0',
+      allocations: [], revenueCents: '0', costCents: zero(), grossProfitCents: zero() };
+    if (input.kind === 'settlement') {
+      const source = this.listSettlements().find(s => s.id === input.originId);
+      if (!source) throw new BusinessError('not_found', 'Unknown settlement');
+      result.cashCents = String(-BigInt(source.amountCents));
+      result.excessCents = String(-BigInt(source.excessCents));
+      result.allocations = source.allocations.map(a => ({ ...a, amountCents: String(-BigInt(a.amountCents)) }));
+    } else {
+      const source = input.kind === 'purchase' ? this.getPurchaseReceipt(input.originId) : this.getDelivery(input.originId);
+      if (!source) throw new BusinessError('not_found', 'Unknown posted stock record');
+      if (this.#allocated(input.originId) > 0n || (input.kind === 'sale' && this.listSettlements().some(s =>
+        s.linkedDeliveryId === input.originId && !this.#isReversed(s.id, 'settlement'))))
+        throw new BusinessError('conflict', 'Reverse related settlements first');
+      result.obligationCents = String(-BigInt(source.totalCents));
+      if (input.kind === 'purchase') {
+        result.stock = (source as PostedReceipt).lines.map(l => ({ productId: l.productId, warehouseId: source.warehouseId,
+          quantity: negate(l.stockQuantity ?? decimal(l.quantity)), valueCents: negate(ratio(BigInt(l.amountCents))) }));
+      } else {
+        const delivery = source as PostedDelivery;
+        result.stock = delivery.lines.map(l => ({ productId: l.productId, warehouseId: source.warehouseId,
+          quantity: decimal(l.quantity), valueCents: l.costCents }));
+        result.revenueCents = String(-BigInt(delivery.totalCents));
+        result.costCents = negate(delivery.costCents); result.grossProfitCents = negate(delivery.grossProfitCents);
+      }
+      const balances = new Map<string, ReturnType<ErpService['getStock']>>();
+      for (const delta of result.stock) {
+        const stock = balances.get(delta.productId) ?? this.getStock(delta.productId, delta.warehouseId);
+        const quantity = add(stock.quantity, delta.quantity), valueCents = add(stock.valueCents, delta.valueCents);
+        if (compare(quantity, zero()) < 0) throw new BusinessError('insufficient_stock', 'Reverse dependent deliveries first');
+        if (compare(valueCents, zero()) < 0 || (quantity.numerator === '0' && valueCents.numerator !== '0'))
+          throw new BusinessError('conflict', 'Reversal would leave invalid inventory valuation; reverse dependent deliveries first');
+        balances.set(delta.productId, { ...stock, quantity, valueCents });
+      }
+    }
+    return result;
+  }
+  confirmReversal(raw: unknown, confirmation: unknown): PostedReversal {
+    const input = validate(reversalSchema, raw);
+    return this.#post('reversal', input, confirmation, (context, now) => ({ ...this.previewReversal(input),
+      id: context.operationId, actorId: context.actorId, channel: context.channel,
+      confirmationId: context.confirmationId, postedAt: now }), result => {
+      this.#db.prepare('INSERT INTO reversals VALUES (?, ?, ?, ?)')
+        .run(result.id, result.originId, result.kind, JSON.stringify(result));
+    });
+  }
+  getSalesTotals(): { revenueCents: string; costCents: Rational; grossProfitCents: Rational } {
+    const active = this.listDeliveries().filter(d => !this.#isReversed(d.id, 'sale'));
+    return { revenueCents: String(active.reduce((sum, d) => sum + BigInt(d.totalCents), 0n)),
+      costCents: active.reduce((sum, d) => add(sum, d.costCents), zero()),
+      grossProfitCents: active.reduce((sum, d) => add(sum, d.grossProfitCents), zero()) };
+  }
+
   #post<T extends { id: string }>(action: string, input: unknown, rawContext: unknown,
     build: (context: Confirmation, now: string) => T, effects?: (result: T) => void): T {
     const context = validate(confirmationSchema, rawContext);
@@ -406,6 +589,7 @@ export class ErpService {
       this.#db.prepare('INSERT INTO operations VALUES (?, ?, ?)').run(context.operationId, request, JSON.stringify(result));
       effects?.(result);
       const evidence: AuditEvidence = { ...context, action, recordId: result.id, recordedAt: now };
+      if (action === 'reversal') evidence.reversalDecision = result;
       if (action === 'settlement' || action === 'delivery_and_receipt') evidence.allocationDecision = input;
       this.#db.prepare('INSERT INTO audit_events VALUES (?, ?)').run(context.operationId, JSON.stringify(evidence));
       this.#beforeCommit?.();
@@ -448,6 +632,10 @@ export class ErpService {
         valueCents = add(valueCents, ratio(BigInt(entry.value_cents as string)));
       }
     }
+    for (const entry of this.listReversals().flatMap(r => r.stock)) {
+      if (entry.productId !== productId || entry.warehouseId !== warehouseId) continue;
+      quantity = add(quantity, entry.quantity); valueCents = add(valueCents, entry.valueCents);
+    }
     return { productId, warehouseId, stockUnit: product.stockUnit!, quantity, valueCents,
       averageCostCents: quantity.numerator === '0' ? null : divide(valueCents, quantity) };
   }
@@ -456,7 +644,7 @@ export class ErpService {
       ? this.#db.prepare('SELECT * FROM payable_ledger ORDER BY rowid').all()
       : this.#db.prepare('SELECT * FROM payable_ledger WHERE supplier_id = ? ORDER BY rowid').all(supplierId);
     for (const row of rows) row.amount_cents = String(BigInt(row.amount_cents as string) - this.#allocated(row.receipt_id as string));
-    return rows.filter(row => BigInt(row.amount_cents as string) > 0n).map(row => ({ receiptId: row.receipt_id as string,
+    return rows.filter(row => !this.#isReversed(row.receipt_id as string, 'purchase') && BigInt(row.amount_cents as string) > 0n).map(row => ({ receiptId: row.receipt_id as string,
       supplierId: row.supplier_id as string, openCents: row.amount_cents as string, currency: 'CNY' }));
   }
   listAuditEvents(): AuditEvidence[] {

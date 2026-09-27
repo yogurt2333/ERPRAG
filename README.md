@@ -1,13 +1,13 @@
 # ERP Rule Audit
 
-> 本仓库包含只读价格规则审计，以及轻量经销 ERP 的 SQLite 采购入库、客户订单、交货与收付款核销闭环。
+> 本仓库包含只读价格规则审计，以及轻量经销 ERP 的 SQLite 采购入库、客户订单、交货与收付款核销闭环；支持版本化包装、临时商品资料待办、管理效期和关联冲销。
 > ERP 其余功能仍待实现，两套上下文的测试证据分别记录。参见
 > [上下文地图](CONTEXT-MAP.md)与[轻量 ERP MVP 设计](docs/lean-erp/MVP-DESIGN.md)。
 
 轻量 ERP：`npm run demo:erp` 运行合成采购、部分交货及收付款演示，`npm run test:erp` 验证真实
 临时 SQLite 数据库上的业务行为。接口、数值约定与当前范围见
 [采购入库使用说明](docs/lean-erp/PURCHASE-RECEIPT.md)、[订单交货使用说明](docs/lean-erp/SALES-DELIVERY.md)
-与[收付款核销说明](docs/lean-erp/SETTLEMENT.md)。
+与[收付款核销说明](docs/lean-erp/SETTLEMENT.md)、[包装与管理效期说明](docs/lean-erp/PRODUCT-PACKS-EXPIRY.md)、[冲销说明](docs/lean-erp/REVERSALS.md)。
 
 基于真实 ERP 页面结构设计的**合成业务演示**。TypeScript / Node.js + Pi，
 只读调查销售价格规则，不连接生产 ERP，不包含原始 HTML 或客户数据。
