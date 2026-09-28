@@ -232,11 +232,11 @@ evidence produces no causal explanation.
 
 ## Further Notes
 
-- The business design and ADRs are agreed. Tickets 01–05 implement local SQLite purchase receipt, customer orders, delivery, settlement allocation, versioned packs, provisional products, managed expiry and linked posted-record reversals with their own behavior tests; remaining tickets are pending. Preserve this limited implementation scope in README, portfolio and resume claims.
+- The business design and ADRs are agreed. Tickets 01–09 implement local SQLite purchase receipt, customer orders, delivery, settlement allocation, versioned packs, provisional products, managed expiry, linked posted-record reversals, partial returns, quarantine resolution, stocktake reconciliation, transfers, losses and concurrent stock protection, durable follow-ups, deterministic reminders/summaries and versioned operation drafts with transactional idempotent confirmation and their own behavior tests; remaining tickets are pending. Preserve this limited implementation scope in README, portfolio and resume claims.
 - The repository currently contains a verified read-only synthetic price-audit program and historical ERPNext learning artifacts. They provide testing and domain lessons, not reusable proof of operational ERP correctness.
 - Before Phase 1 implementation, verify the current Hermes WeChat adapter's message identity, duplicate-delivery behavior, reconnection semantics, outbound scheduled delivery and tool registration against the selected release.
 - Select an external model provider and document its data retention, timeout, retry and outage behavior before production use.
 - Select an object-storage provider and verify region, encryption, lifecycle rules, restoration time and cost before implementing cold archival.
 - Use the target stable HTTPS subdomain as the WebAuthn relying-party ID from the first production enrollment; temporary tunnel or raw-IP credentials are not production credentials.
 - If the 2-GB target fails measured acceptance, first remove optional Hermes capabilities and tune bounded caches/workers. Do not weaken transaction, validation, audit or backup guarantees to fit memory.
-- Dependency-aware tickets are in `issues/`. Tickets 01–05 are complete; continue with the next unblocked ticket. Each implementation ticket carries its own acceptance criteria and referenced decisions.
+- Dependency-aware tickets are in `issues/`. Tickets 01–09 are complete; continue with the next unblocked ticket. Each implementation ticket carries its own acceptance criteria and referenced decisions.

@@ -6,7 +6,7 @@ export function openDatabase(path: string): DatabaseSync {
     db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     db.exec('BEGIN IMMEDIATE');
     const version = db.prepare('PRAGMA user_version').get()!.user_version;
-    if (![0, 1, 2, 3, 4, 5].includes(Number(version))) throw new Error(`Unsupported ERP schema version: ${version}`);
+    if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9].includes(Number(version))) throw new Error(`Unsupported ERP schema version: ${version}`);
     if (version === 0) db.exec(`
       CREATE TABLE masters (
         id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('product','supplier','warehouse')),
@@ -99,6 +99,47 @@ export function openDatabase(path: string): DatabaseSync {
         document TEXT NOT NULL, UNIQUE(origin_id, kind)
       ) STRICT;
       PRAGMA user_version = 5;
+    `);
+    if (Number(version) < 6) db.exec(`
+      CREATE TABLE returns (
+        id TEXT PRIMARY KEY REFERENCES operations(id), origin_id TEXT NOT NULL REFERENCES operations(id),
+        document TEXT NOT NULL
+      ) STRICT;
+      CREATE INDEX return_origin ON returns(origin_id);
+      CREATE TABLE quarantines (
+        id TEXT PRIMARY KEY REFERENCES operations(id), document TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE quarantine_resolutions (
+        id TEXT PRIMARY KEY REFERENCES operations(id), quarantine_id TEXT NOT NULL UNIQUE REFERENCES quarantines(id),
+        document TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE return_refunds (
+        id TEXT PRIMARY KEY REFERENCES operations(id), origin_id TEXT NOT NULL REFERENCES operations(id), document TEXT NOT NULL
+      ) STRICT;
+      PRAGMA user_version = 6;
+    `);
+    if (Number(version) < 7) db.exec(`
+      CREATE TABLE stocktakes (
+        id TEXT PRIMARY KEY REFERENCES operations(id), document TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE inventory_operations (
+        id TEXT PRIMARY KEY REFERENCES operations(id),
+        stocktake_id TEXT UNIQUE REFERENCES stocktakes(id), document TEXT NOT NULL
+      ) STRICT;
+      PRAGMA user_version = 7;
+    `);
+    if (Number(version) < 8) db.exec(`
+      CREATE TABLE followups (id TEXT PRIMARY KEY, document TEXT NOT NULL) STRICT;
+      CREATE TABLE followup_history (id INTEGER PRIMARY KEY, document TEXT NOT NULL) STRICT;
+      CREATE TABLE notification_events (id TEXT PRIMARY KEY, document TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0) STRICT;
+      PRAGMA user_version = 8;
+    `);
+    if (Number(version) < 9) db.exec(`
+      CREATE TABLE operation_drafts (scope TEXT NOT NULL, version INTEGER NOT NULL, document TEXT NOT NULL,
+        PRIMARY KEY(scope, version)) STRICT;
+      CREATE TABLE draft_events (scope TEXT NOT NULL, event_id TEXT NOT NULL, request TEXT NOT NULL, result TEXT NOT NULL,
+        PRIMARY KEY(scope, event_id)) STRICT;
+      PRAGMA user_version = 9;
     `);
     db.exec('COMMIT');
     return db;

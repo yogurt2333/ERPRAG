@@ -1,3 +1,5 @@
+import { DraftStore, type DraftAction, type DraftContext, type DraftCommand } from './drafts.ts';
+import { FollowupStore, type FollowupDecision, type NotificationEvent } from './followups.ts';
 import { randomUUID } from 'node:crypto';
 import { Type, type Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
@@ -95,7 +97,47 @@ export interface ReversalProposal extends Static<typeof reversalSchema> {
 export interface PostedReversal extends ReversalProposal {
   id: string; actorId: string; channel: Confirmation['channel']; confirmationId: string; postedAt: string;
 }
-export interface AuditEvidence extends Confirmation { action: string; recordId: string; recordedAt: string; allocationDecision?: unknown; reversalDecision?: unknown }
+const returnKind = Type.Union([Type.Literal('sale'), Type.Literal('purchase')]);
+const stockQuantity = object({ numerator: positiveInteger, denominator: positiveInteger });
+const countQuantity = object({ numerator: Type.String({ pattern: '^(0|[1-9][0-9]{0,17})$' }), denominator: positiveInteger });
+const stocktakeSchema = object({ productId: text, warehouseId: text, physicalQuantity: countQuantity, reason: text });
+const stocktakeResolutionSchema = object({ stocktakeId: text, reason: text, outcome: Type.Union([
+  object({ kind: Type.Literal('adjustment'), openingUnitCostCents: Type.Optional(centsSchema) }),
+  object({ kind: Type.Literal('restored_source'), sourceId: text })
+]) });
+const transferSchema = object({ productId: text, warehouseId: text, destinationId: text, quantity: stockQuantity, reason: text });
+const lossSchema = object({ productId: text, warehouseId: text, quantity: stockQuantity, reason: text });
+export interface Stocktake extends Static<typeof stocktakeSchema> {
+  id: string; postedAt: string; ledgerQuantity: Rational; ledgerValueCents: Rational; difference: Rational;
+}
+export interface InventoryProposal {
+  kind: 'adjustment' | 'restored_source' | 'transfer' | 'loss'; reason: string;
+  stocktakeId?: string; sourceId?: string; stock: ReversalProposal['stock']; lossCents: Rational;
+}
+export interface InventoryOperation extends InventoryProposal {
+  id: string; postedAt: string; actorId: string; channel: Confirmation['channel']; confirmationId: string;
+}
+const returnSchema = object({ kind: returnKind, originId: text, lineIndex: Type.Integer({ minimum: 0, maximum: 499 }),
+  quantity: stockQuantity, condition: Type.Union([Type.Literal('saleable'), Type.Literal('damaged')]), reason: text });
+const quarantineSchema = object({ customerId: text, productId: text, warehouseId: text, quantity: stockQuantity,
+  condition: Type.Union([Type.Literal('unknown'), Type.Literal('saleable'), Type.Literal('damaged')]), reason: text });
+const resolutionSchema = object({ quarantineId: text, reason: text, outcome: Type.Union([
+  object({ kind: Type.Literal('linked_return'), originId: text, lineIndex: Type.Integer({ minimum: 0, maximum: 499 }),
+    condition: returnSchema.properties.condition }),
+  object({ kind: Type.Literal('return_to_sender') }), object({ kind: Type.Literal('confirmed_loss') }) ]) });
+export interface PostedReturn extends Static<typeof returnSchema> {
+  id: string; actorId: string; channel: Confirmation['channel']; confirmationId: string; postedAt: string;
+  partyId: string; productId: string; warehouseId: string; amountCents: string; originalCostCents: Rational;
+  stock: ReversalProposal['stock']; revenueCents: string; costCents: Rational; lossCents: Rational;
+  grossProfitCents: Rational; quarantineId?: string;
+}
+export interface QuarantinedReturn extends Static<typeof quarantineSchema> {
+  id: string; postedAt: string;
+}
+export interface QuarantineResolution extends Static<typeof resolutionSchema> { id: string; postedAt: string }
+export interface ReturnRefund { id: string; originId: string; kind: 'sale' | 'purchase'; amountCents: string;
+  reason: string; postedAt: string; direction: 'outgoing' | 'incoming' }
+export interface AuditEvidence extends Confirmation { action: string; recordId: string; recordedAt: string; allocationDecision?: unknown; reversalDecision?: unknown; draftVersion?: number; conversationId?: string }
 export class BusinessError extends Error {
   readonly code: 'invalid_input' | 'not_found' | 'idempotency_conflict' | 'busy' | 'conflict' | 'insufficient_stock';
   constructor(code: BusinessError['code'], message: string) {
@@ -124,12 +166,90 @@ function canonical(value: unknown): string {
 export class ErpService {
   #db: ReturnType<typeof openDatabase>;
   #beforeCommit?: () => void;
-  constructor(path: string, options: { beforeCommit?: () => void } = {}) {
+  #clock: () => Date;
+  #followups: FollowupStore;
+  constructor(path: string, options: { beforeCommit?: () => void; clock?: () => Date } = {}) {
     this.#db = openDatabase(path);
+    this.#clock = options.clock ?? (() => new Date());
+    this.#followups = new FollowupStore(this.#db, this);
     // Composition-time fault seam for transaction tests; never a command field.
     this.#beforeCommit = options.beforeCommit;
   }
   close(): void { this.#db.close(); }
+
+  /** Authenticated adapters supply identity and a stable inbound event ID. */
+  handleDraft(context: DraftContext, action: DraftAction) {
+    return new DraftStore(this.#db, (command, confirmation) => this.#executeDraft(command, confirmation),
+      () => this.#draftSnapshot(), () => this.#beforeCommit?.(), this.#clock).handle(context, action);
+  }
+  #executeDraft(command: DraftCommand, confirmation: Confirmation): unknown {
+    if (!command || typeof command.kind !== 'string' || Object.keys(command).some(k => !['kind', 'input'].includes(k)))
+      throw new BusinessError('invalid_input', 'Invalid structured draft');
+    switch (command.kind) {
+      case 'purchase_receipt': return this.confirmPurchaseReceipt(command.input, confirmation);
+      case 'sales_order': return this.createSalesOrder(command.input, confirmation);
+      case 'change_sales_order': return this.changeSalesOrder(command.input, confirmation);
+      case 'cancel_sales_order': return this.cancelSalesOrder(command.input, confirmation);
+      case 'delivery': return this.confirmDelivery(command.input, confirmation);
+      case 'delivery_and_receipt': return this.confirmDeliveryAndReceipt(command.input, confirmation);
+      case 'allocated_settlement': return this.confirmSettlement(command.input, confirmation);
+      case 'settlement': return this.confirmSettlement(this.previewSettlement(command.input), confirmation);
+      case 'reversal': return this.confirmReversal(command.input, confirmation);
+      case 'return': return this.confirmReturn(command.input, confirmation);
+      case 'quarantine_return': return this.receiveQuarantinedReturn(command.input, confirmation);
+      case 'resolve_quarantine': return this.resolveQuarantinedReturn(command.input, confirmation);
+      case 'return_refund': return this.confirmReturnRefund(command.input, confirmation);
+      case 'stocktake': return this.recordStocktake(command.input, confirmation);
+      case 'resolve_stocktake': return this.confirmStocktakeResolution(command.input, confirmation);
+      case 'transfer': return this.confirmTransfer(command.input, confirmation);
+      case 'loss': return this.confirmLoss(command.input, confirmation);
+      case 'product': return this.createProduct(command.input, confirmation);
+      case 'supplier': return this.createSupplier(command.input, confirmation);
+      case 'customer': return this.createCustomer(command.input, confirmation);
+      case 'warehouse': return this.createWarehouse(command.input, confirmation);
+      case 'product_details': return this.updateProductDetails(command.input, confirmation);
+      case 'pack_unit': return this.definePackUnit(command.input, confirmation);
+      case 'followup_decision': return this.decideFollowup(command.input, confirmation);
+      default: throw new BusinessError('invalid_input', 'Unsupported draft operation');
+    }
+  }
+  #draftSnapshot() {
+    const products = this.listMasters('product'), warehouses = this.listMasters('warehouse');
+    return {
+      counterparties: [...this.listMasters('customer'), ...this.listMasters('supplier')], products, warehouses,
+      stock: products.flatMap(p => warehouses.map(w => this.getStock(p.id, w.id))),
+      payables: this.listOpenPayables(), receivables: this.listOpenReceivables(), settlements: this.listSettlements(),
+      quarantine: this.listQuarantinedReturns(), refunds: this.listReturnRefunds(),
+    };
+  }
+
+
+  listFollowups() { return this.#followups.list(); }
+  listFollowupHistory() { return this.#followups.history(); }
+  listNotifications() { return this.#followups.events(); }
+  decideFollowup(raw: unknown, confirmation: unknown) {
+    const input = validate(object({ id: text, status: Type.Union([Type.Literal('resolved'), Type.Literal('deferred'), Type.Literal('ignored')]),
+      reason: text, until: Type.Optional(text) }), raw);
+    return this.#post('followup_decision', input, confirmation, (context, now) =>
+      this.#followups.decide(input as FollowupDecision, now, context));
+  }
+  runScheduler() {
+    try {
+      this.#db.exec('BEGIN IMMEDIATE');
+      const now = this.#clock().toISOString();
+      this.#followups.refresh(now, 'operator');
+      this.#followups.schedule(now);
+      this.#beforeCommit?.();
+      this.#db.exec('COMMIT');
+      return this.listNotifications();
+    } catch (error) { if (this.#db.isTransaction) this.#db.exec('ROLLBACK'); throw error; }
+  }
+  async deliverNotifications(adapter: { deliver(event: NotificationEvent): Promise<void> }) {
+    for (const event of this.#followups.pending()) {
+      await adapter.deliver(event);
+      this.#followups.ack(event.id);
+    }
+  }
 
   createProduct(input: unknown, confirmation: unknown): Master {
     const value = validate(productSchema, input);
@@ -398,7 +518,7 @@ export class ErpService {
   listOpenReceivables(customerId?: string): { deliveryId: string; customerId: string; openCents: string; currency: 'CNY' }[] {
     const rows = customerId === undefined ? this.#db.prepare('SELECT * FROM receivable_ledger ORDER BY rowid').all()
       : this.#db.prepare('SELECT * FROM receivable_ledger WHERE customer_id = ? ORDER BY rowid').all(customerId);
-    for (const row of rows) row.amount_cents = String(BigInt(row.amount_cents as string) - this.#allocated(row.delivery_id as string));
+    for (const row of rows) row.amount_cents = String(BigInt(row.amount_cents as string) - this.#allocated(row.delivery_id as string) - this.#returnedAmount(row.delivery_id as string));
     return rows.filter(row => !this.#isReversed(row.delivery_id as string, 'sale') && BigInt(row.amount_cents as string) > 0n).map(row => ({ deliveryId: row.delivery_id as string,
       customerId: row.customer_id as string, openCents: row.amount_cents as string, currency: 'CNY' }));
   }
@@ -511,6 +631,150 @@ export class ErpService {
   #isReversed(originId: string, kind: ReversalProposal['kind']): boolean {
     return !!this.#db.prepare('SELECT 1 FROM reversals WHERE origin_id = ? AND kind = ?').get(originId, kind);
   }
+  listReturns(): PostedReturn[] {
+    return this.#db.prepare('SELECT document FROM returns ORDER BY rowid').all()
+      .map(row => JSON.parse(row.document as string) as PostedReturn);
+  }
+  #returnedAmount(originId: string): bigint {
+    return this.listReturns().filter(r => r.originId === originId).reduce((n, r) => n + BigInt(r.amountCents), 0n);
+  }
+  #returnSource(kind: 'sale' | 'purchase', originId: string, lineIndex: number) {
+    const source = kind === 'sale' ? this.getDelivery(originId) : this.getPurchaseReceipt(originId);
+    if (!source) throw new BusinessError('not_found', 'Unknown return origin');
+    if (this.#isReversed(originId, kind)) throw new BusinessError('conflict', 'Origin has been reversed');
+    const line = source.lines[lineIndex];
+    if (!line) throw new BusinessError('invalid_input', 'Unknown originating line');
+    const quantity = 'stockQuantity' in line && line.stockQuantity ? line.stockQuantity : decimal(line.quantity);
+    const cost = 'costCents' in line ? line.costCents : ratio(BigInt(line.amountCents));
+    const returned = this.listReturns().filter(r => r.originId === originId && r.kind === kind && r.lineIndex === lineIndex)
+      .reduce((q, r) => add(q, r.quantity), zero());
+    return { source, line, quantity, cost, returned, remaining: subtract(quantity, returned),
+      partyId: 'customerId' in source ? source.customerId : source.supplierId };
+  }
+  searchReturnCandidates(raw: unknown): { originId: string; lineIndex: number; postedAt: string;
+    warehouseId: string; remainingQuantity: Rational }[] {
+    const input = validate(object({ kind: returnKind, partyId: text, productId: text, quantity: stockQuantity,
+      fromDate: dueDateSchema, throughDate: dueDateSchema }), raw);
+    validateDueDate(input.fromDate); validateDueDate(input.throughDate);
+    if (input.fromDate > input.throughDate) throw new BusinessError('invalid_input', 'Invalid date range');
+    this.#requireMaster(input.partyId, input.kind === 'sale' ? 'customer' : 'supplier');
+    this.#requireMaster(input.productId, 'product');
+    const sources = input.kind === 'sale' ? this.listDeliveries() : this.listPurchaseReceipts();
+    return sources.filter(s => !this.#isReversed(s.id, input.kind) && s.postedAt.slice(0, 10) >= input.fromDate &&
+      s.postedAt.slice(0, 10) <= input.throughDate).flatMap(s => s.lines.flatMap((line, lineIndex) => {
+        const origin = this.#returnSource(input.kind, s.id, lineIndex);
+        return origin.partyId === input.partyId && line.productId === input.productId && compare(origin.remaining, input.quantity) >= 0
+          ? [{ originId: s.id, lineIndex, postedAt: s.postedAt, warehouseId: s.warehouseId, remainingQuantity: origin.remaining }] : [];
+      }));
+  }
+  previewReturn(raw: unknown): Omit<PostedReturn, 'id' | 'actorId' | 'channel' | 'confirmationId' | 'postedAt'> {
+    const input = validate(returnSchema, raw);
+    const origin = this.#returnSource(input.kind, input.originId, input.lineIndex);
+    if (compare(input.quantity, origin.remaining) > 0) throw new BusinessError('conflict', 'Return exceeds remaining originating quantity');
+    // Cumulative allocation gives deterministic integer cents and the final partial return takes the remainder.
+    const allocated = (q: Rational) => {
+      const exact = multiply(ratio(BigInt(origin.line.amountCents)), divide(q, origin.quantity));
+      return BigInt(exact.numerator) / BigInt(exact.denominator);
+    };
+    const amountCents = String(allocated(add(origin.returned, input.quantity)) - allocated(origin.returned));
+    const originalCostCents = multiply(origin.cost, divide(input.quantity, origin.quantity));
+    const isSale = input.kind === 'sale';
+    const lossCents = isSale && input.condition === 'damaged' ? originalCostCents : zero();
+    const stock = isSale && input.condition === 'damaged' ? [] : [{ productId: origin.line.productId,
+      warehouseId: origin.source.warehouseId, quantity: isSale ? input.quantity : negate(input.quantity),
+      valueCents: isSale ? originalCostCents : negate(originalCostCents) }];
+    for (const delta of stock) {
+      const current = this.getStock(delta.productId, delta.warehouseId);
+      const quantity = add(current.quantity, delta.quantity), value = add(current.valueCents, delta.valueCents);
+      if (compare(quantity, zero()) < 0) throw new BusinessError('insufficient_stock', 'Purchase return exceeds available stock');
+      if (compare(value, zero()) < 0 || (quantity.numerator === '0' && value.numerator !== '0'))
+        throw new BusinessError('conflict', 'Return would leave invalid inventory valuation');
+    }
+    const revenueCents = isSale ? String(-BigInt(amountCents)) : '0';
+    const costCents = isSale ? negate(originalCostCents) : zero();
+    return { ...input, quantity: ratio(BigInt(input.quantity.numerator), BigInt(input.quantity.denominator)),
+      partyId: origin.partyId, productId: origin.line.productId, warehouseId: origin.source.warehouseId,
+      amountCents, originalCostCents, stock, revenueCents, costCents, lossCents,
+      grossProfitCents: subtract(subtract(ratio(BigInt(revenueCents)), costCents), lossCents) };
+  }
+  #buildReturn(input: unknown, context: Confirmation, now: string): PostedReturn {
+    return { ...this.previewReturn(input), id: context.operationId, actorId: context.actorId,
+      channel: context.channel, confirmationId: context.confirmationId, postedAt: now };
+  }
+  #saveReturn(result: PostedReturn): void {
+    this.#db.prepare('INSERT INTO returns VALUES (?, ?, ?)').run(result.id, result.originId, JSON.stringify(result));
+  }
+  confirmReturn(raw: unknown, confirmation: unknown): PostedReturn {
+    const input = validate(returnSchema, raw);
+    return this.#post('return', input, confirmation, (context, now) => this.#buildReturn(input, context, now), r => this.#saveReturn(r));
+  }
+  receiveQuarantinedReturn(raw: unknown, confirmation: unknown): QuarantinedReturn {
+    const input = validate(quarantineSchema, raw);
+    return this.#post('quarantine', input, confirmation, (context, now) => {
+      this.#requireMaster(input.customerId, 'customer'); this.#requireMaster(input.productId, 'product');
+      this.#requireMaster(input.warehouseId, 'warehouse');
+      return { ...input, id: context.operationId, postedAt: now };
+    }, r => { this.#db.prepare('INSERT INTO quarantines VALUES (?, ?)').run(r.id, JSON.stringify(r)); });
+  }
+  listQuarantineResolutions(): QuarantineResolution[] {
+    return this.#db.prepare('SELECT document FROM quarantine_resolutions ORDER BY rowid').all()
+      .map(row => JSON.parse(row.document as string) as QuarantineResolution);
+  }
+  listQuarantinedReturns(): (QuarantinedReturn & { status: 'open' | 'resolved'; resolutionId?: string })[] {
+    const resolutions = this.listQuarantineResolutions();
+    return this.#db.prepare('SELECT document FROM quarantines ORDER BY rowid').all().map(row => {
+      const q = JSON.parse(row.document as string) as QuarantinedReturn;
+      const resolution = resolutions.find(r => r.quarantineId === q.id);
+      return { ...q, status: resolution ? 'resolved' : 'open', ...(resolution ? { resolutionId: resolution.id } : {}) };
+    });
+  }
+  listReturnFollowups() {
+    return this.listQuarantinedReturns().map(q => ({ quarantineId: q.id, productId: q.productId,
+      status: q.status, reason: q.reason, resolutionId: q.resolutionId }));
+  }
+  resolveQuarantinedReturn(raw: unknown, confirmation: unknown): QuarantineResolution {
+    const input = validate(resolutionSchema, raw);
+    return this.#post('resolve_quarantine', input, confirmation, (context, now) => {
+      const q = this.listQuarantinedReturns().find(q => q.id === input.quarantineId);
+      if (!q) throw new BusinessError('not_found', 'Unknown quarantine');
+      if (q.status !== 'open') throw new BusinessError('conflict', 'Quarantine already resolved');
+      let linkedReturn: PostedReturn | undefined;
+      if (input.outcome.kind === 'linked_return') {
+        linkedReturn = this.#buildReturn({ kind: 'sale', originId: input.outcome.originId,
+          lineIndex: input.outcome.lineIndex, quantity: q.quantity, condition: input.outcome.condition, reason: input.reason }, context, now);
+        if (linkedReturn.partyId !== q.customerId || linkedReturn.productId !== q.productId || linkedReturn.warehouseId !== q.warehouseId)
+          throw new BusinessError('conflict', 'Origin does not match quarantined party, product and location');
+        linkedReturn.quarantineId = q.id;
+      }
+      return { ...input, id: context.operationId, postedAt: now, ...(linkedReturn ? { linkedReturn } : {}) };
+    }, r => {
+      if (r.linkedReturn) this.#saveReturn(r.linkedReturn);
+      this.#db.prepare('INSERT INTO quarantine_resolutions VALUES (?, ?, ?)').run(r.id, r.quarantineId, JSON.stringify(r));
+    });
+  }
+  listReturnRefunds(): ReturnRefund[] {
+    return this.#db.prepare('SELECT document FROM return_refunds ORDER BY rowid').all()
+      .map(row => JSON.parse(row.document as string) as ReturnRefund);
+  }
+  getReturnRefundBalance(raw: unknown): { amountCents: string; direction: 'outgoing' | 'incoming' } {
+    const input = validate(object({ originId: text, kind: returnKind }), raw);
+    const source = input.kind === 'sale' ? this.getDelivery(input.originId) : this.getPurchaseReceipt(input.originId);
+    if (!source) throw new BusinessError('not_found', 'Unknown refund origin');
+    const paidRefunds = this.listReturnRefunds().filter(r => r.originId === input.originId)
+      .reduce((sum, r) => sum + BigInt(r.amountCents), 0n);
+    const credit = this.#allocated(input.originId) + this.#returnedAmount(input.originId) - BigInt(source.totalCents);
+    return { amountCents: String((credit > 0n ? credit : 0n) - paidRefunds), direction: input.kind === 'sale' ? 'outgoing' : 'incoming' };
+  }
+  confirmReturnRefund(raw: unknown, confirmation: unknown): ReturnRefund {
+    const input = validate(object({ originId: text, kind: returnKind, amountCents: centsSchema, reason: text }), raw);
+    return this.#post('return_refund', input, confirmation, (context, now) => {
+      const balance = this.getReturnRefundBalance({ originId: input.originId, kind: input.kind });
+      if (BigInt(input.amountCents) <= 0n || BigInt(input.amountCents) > BigInt(balance.amountCents))
+        throw new BusinessError('conflict', 'Refund must be positive and within the outstanding return credit');
+      return { ...input, id: context.operationId, postedAt: now, direction: balance.direction };
+    }, r => { this.#db.prepare('INSERT INTO return_refunds VALUES (?, ?, ?)').run(r.id, r.originId, JSON.stringify(r)); });
+  }
+
   listReversals(): PostedReversal[] {
     return this.#db.prepare('SELECT document FROM reversals ORDER BY rowid').all()
       .map(row => JSON.parse(row.document as string) as PostedReversal);
@@ -524,12 +788,16 @@ export class ErpService {
     if (input.kind === 'settlement') {
       const source = this.listSettlements().find(s => s.id === input.originId);
       if (!source) throw new BusinessError('not_found', 'Unknown settlement');
+      if (source.allocations.some(a => this.listReturnRefunds().some(r => r.originId === a.obligationId)))
+        throw new BusinessError('conflict', 'Settlement supports a paid return refund and cannot be fully reversed');
       result.cashCents = String(-BigInt(source.amountCents));
       result.excessCents = String(-BigInt(source.excessCents));
       result.allocations = source.allocations.map(a => ({ ...a, amountCents: String(-BigInt(a.amountCents)) }));
     } else {
       const source = input.kind === 'purchase' ? this.getPurchaseReceipt(input.originId) : this.getDelivery(input.originId);
       if (!source) throw new BusinessError('not_found', 'Unknown posted stock record');
+      if (this.listReturns().some(r => r.originId === input.originId))
+        throw new BusinessError('conflict', 'Origin has physical returns; full reversal would double count');
       if (this.#allocated(input.originId) > 0n || (input.kind === 'sale' && this.listSettlements().some(s =>
         s.linkedDeliveryId === input.originId && !this.#isReversed(s.id, 'settlement'))))
         throw new BusinessError('conflict', 'Reverse related settlements first');
@@ -567,24 +835,134 @@ export class ErpService {
   }
   getSalesTotals(): { revenueCents: string; costCents: Rational; grossProfitCents: Rational } {
     const active = this.listDeliveries().filter(d => !this.#isReversed(d.id, 'sale'));
-    return { revenueCents: String(active.reduce((sum, d) => sum + BigInt(d.totalCents), 0n)),
-      costCents: active.reduce((sum, d) => add(sum, d.costCents), zero()),
-      grossProfitCents: active.reduce((sum, d) => add(sum, d.grossProfitCents), zero()) };
+    const returns = this.listReturns().filter(r => r.kind === 'sale');
+    return { revenueCents: String(returns.reduce((sum, r) => sum + BigInt(r.revenueCents), active.reduce((sum, d) => sum + BigInt(d.totalCents), 0n))),
+      costCents: returns.reduce((sum, r) => add(sum, r.costCents), active.reduce((sum, d) => add(sum, d.costCents), zero())),
+      grossProfitCents: returns.reduce((sum, r) => add(sum, r.grossProfitCents), active.reduce((sum, d) => add(sum, d.grossProfitCents), zero())) };
+  }
+  getReturnLossTotals(): { knownLossCents: Rational; unvaluedQuarantineLosses: string[] } {
+    return { knownLossCents: this.listReturns().reduce((sum, r) => add(sum, r.lossCents), zero()),
+      unvaluedQuarantineLosses: this.listQuarantineResolutions().filter(r => r.outcome.kind === 'confirmed_loss').map(r => r.id) };
+  }
+
+  /** Recording a count preserves its comparison without changing inventory. */
+  recordStocktake(raw: unknown, confirmation: unknown): Stocktake {
+    const input = validate(stocktakeSchema, raw);
+    return this.#post('stocktake', input, confirmation, (context, now) => {
+      const stock = this.getStock(input.productId, input.warehouseId);
+      const physicalQuantity = ratio(BigInt(input.physicalQuantity.numerator), BigInt(input.physicalQuantity.denominator));
+      return { ...input, physicalQuantity, id: context.operationId, postedAt: now,
+        ledgerQuantity: stock.quantity, ledgerValueCents: stock.valueCents, difference: subtract(physicalQuantity, stock.quantity) };
+    }, result => { this.#db.prepare('INSERT INTO stocktakes VALUES (?, ?)').run(result.id, JSON.stringify(result)); });
+  }
+  listStocktakes(): Stocktake[] {
+    return this.#db.prepare('SELECT document FROM stocktakes ORDER BY rowid').all().map(r => JSON.parse(r.document as string) as Stocktake);
+  }
+  listInventoryOperations(): InventoryOperation[] {
+    return this.#db.prepare('SELECT document FROM inventory_operations ORDER BY rowid').all()
+      .map(r => JSON.parse(r.document as string) as InventoryOperation);
+  }
+  previewStocktakeResolution(raw: unknown): InventoryProposal {
+    const input = validate(stocktakeResolutionSchema, raw);
+    const count = this.listStocktakes().find(r => r.id === input.stocktakeId);
+    if (!count) throw new BusinessError('not_found', 'Unknown stocktake');
+    if (this.listInventoryOperations().some(r => r.stocktakeId === count.id))
+      throw new BusinessError('conflict', 'Stocktake already resolved');
+    const current = this.getStock(count.productId, count.warehouseId);
+    const result: InventoryProposal = { kind: input.outcome.kind, reason: input.reason, stocktakeId: count.id, stock: [], lossCents: zero() };
+    if (input.outcome.kind === 'restored_source') {
+      const sourceId = input.outcome.sourceId;
+      const later = this.#db.prepare('SELECT 1 FROM operations s, operations c WHERE s.id = ? AND c.id = ? AND s.rowid > c.rowid').get(sourceId, count.id);
+      const receipt = this.getPurchaseReceipt(sourceId), delivery = this.getDelivery(sourceId);
+      let delta = zero();
+      if (receipt?.warehouseId === count.warehouseId && !this.#isReversed(sourceId, 'purchase'))
+        for (const line of receipt.lines) if (line.productId === count.productId) delta = add(delta, line.stockQuantity ?? decimal(line.quantity));
+      if (delivery?.warehouseId === count.warehouseId && !this.#isReversed(sourceId, 'sale'))
+        for (const line of delivery.lines) if (line.productId === count.productId) delta = subtract(delta, decimal(line.quantity));
+      const otherSource = this.listReturns().find(r => r.id === sourceId)
+        ?? this.listInventoryOperations().find(r => r.id === sourceId && (r.kind === 'loss' || r.kind === 'transfer'));
+      for (const entry of otherSource?.stock ?? [])
+        if (entry.productId === count.productId && entry.warehouseId === count.warehouseId) delta = add(delta, entry.quantity);
+      if (!later || compare(delta, zero()) === 0 || compare(delta, count.difference) !== 0 || compare(current.quantity, count.physicalQuantity) !== 0
+        || this.listReturns().some(r => r.originId === sourceId))
+        throw new BusinessError('conflict', 'Restore a matching missing stock transaction, then reconcile the count');
+      return { ...result, sourceId };
+    }
+    if (compare(current.quantity, count.ledgerQuantity) !== 0 || compare(current.valueCents, count.ledgerValueCents) !== 0)
+      throw new BusinessError('conflict', 'Stock changed since count; record a new count');
+    let unitCost = current.averageCostCents;
+    if (compare(count.difference, zero()) > 0 && unitCost === null) {
+      if (input.outcome.openingUnitCostCents === undefined)
+        throw new BusinessError('invalid_input', 'Opening stock gain requires an evidenced unit cost in cents');
+      unitCost = ratio(BigInt(input.outcome.openingUnitCostCents));
+    } else if (input.outcome.openingUnitCostCents !== undefined)
+      throw new BusinessError('invalid_input', 'Existing stock must use ledger average cost');
+    result.stock = [{ productId: count.productId, warehouseId: count.warehouseId,
+      quantity: count.difference, valueCents: multiply(count.difference, unitCost ?? zero()) }];
+    return result;
+  }
+  confirmStocktakeResolution(raw: unknown, confirmation: unknown): InventoryOperation {
+    const input = validate(stocktakeResolutionSchema, raw);
+    return this.#postInventory('stocktake_resolution', input, confirmation, () => this.previewStocktakeResolution(input));
+  }
+  previewTransfer(raw: unknown): InventoryProposal {
+    const input = validate(transferSchema, raw);
+    this.#requireMaster(input.destinationId, 'warehouse');
+    if (input.destinationId === input.warehouseId) throw new BusinessError('invalid_input', 'Transfer needs distinct warehouses');
+    const issue = this.#inventoryIssue(input);
+    return { kind: 'transfer', reason: input.reason, lossCents: zero(), stock: [issue,
+      { ...issue, warehouseId: input.destinationId, quantity: negate(issue.quantity), valueCents: negate(issue.valueCents) }] };
+  }
+  confirmTransfer(raw: unknown, confirmation: unknown): InventoryOperation {
+    const input = validate(transferSchema, raw);
+    return this.#postInventory('transfer', input, confirmation, () => this.previewTransfer(input));
+  }
+  previewLoss(raw: unknown): InventoryProposal {
+    const input = validate(lossSchema, raw), issue = this.#inventoryIssue(input);
+    return { kind: 'loss', reason: input.reason, stock: [issue], lossCents: negate(issue.valueCents) };
+  }
+  confirmLoss(raw: unknown, confirmation: unknown): InventoryOperation {
+    const input = validate(lossSchema, raw);
+    return this.#postInventory('loss', input, confirmation, () => this.previewLoss(input));
+  }
+  #inventoryIssue(input: Static<typeof lossSchema>): ReversalProposal['stock'][number] {
+    const current = this.getStock(input.productId, input.warehouseId);
+    const quantity = ratio(BigInt(input.quantity.numerator), BigInt(input.quantity.denominator));
+    if (compare(quantity, current.quantity) > 0) throw new BusinessError('insufficient_stock', 'Issue would make inventory negative');
+    return { productId: input.productId, warehouseId: input.warehouseId, quantity: negate(quantity),
+      valueCents: negate(multiply(quantity, current.averageCostCents!)) };
+  }
+  #postInventory(action: string, input: unknown, confirmation: unknown, build: () => InventoryProposal): InventoryOperation {
+    return this.#post(action, input, confirmation, (context, now) => ({ ...build(), id: context.operationId, postedAt: now,
+      actorId: context.actorId, channel: context.channel, confirmationId: context.confirmationId }), result => {
+      this.#db.prepare('INSERT INTO inventory_operations VALUES (?, ?, ?)').run(result.id, result.stocktakeId ?? null, JSON.stringify(result));
+    });
+  }
+  getInventoryTotals(): { lossCents: Rational; adjustmentValueCents: Rational; grossProfitAfterKnownLossCents: Rational;
+    unvaluedQuarantineLosses: string[] } {
+    const returns = this.getReturnLossTotals();
+    const lossCents = this.listInventoryOperations().reduce((sum, r) => add(sum, r.lossCents), returns.knownLossCents);
+    const sales = this.getSalesTotals();
+    return { lossCents, adjustmentValueCents: this.listInventoryOperations().filter(r => r.kind === 'adjustment')
+      .flatMap(r => r.stock).reduce((sum, r) => add(sum, r.valueCents), zero()),
+      grossProfitAfterKnownLossCents: subtract(subtract(ratio(BigInt(sales.revenueCents)), sales.costCents), lossCents),
+      unvaluedQuarantineLosses: returns.unvaluedQuarantineLosses };
   }
 
   #post<T extends { id: string }>(action: string, input: unknown, rawContext: unknown,
     build: (context: Confirmation, now: string) => T, effects?: (result: T) => void): T {
     const context = validate(confirmationSchema, rawContext);
     const request = canonical({ action, input, context });
+    const ownsTransaction = !this.#db.isTransaction;
     try {
-      this.#db.exec('BEGIN IMMEDIATE');
+      if (ownsTransaction) this.#db.exec('BEGIN IMMEDIATE');
       const prior = this.#db.prepare('SELECT request, result FROM operations WHERE id = ?').get(context.operationId);
       if (prior) {
         if (prior.request !== request) throw new BusinessError('idempotency_conflict', 'Operation ID already belongs to a different confirmation');
-        this.#db.exec('COMMIT');
+        if (ownsTransaction) this.#db.exec('COMMIT');
         return JSON.parse(prior.result as string) as T;
       }
-      const now = new Date().toISOString();
+      const now = this.#clock().toISOString();
       const result = build(context, now);
       this.#db.prepare('INSERT INTO operations VALUES (?, ?, ?)').run(context.operationId, request, JSON.stringify(result));
       effects?.(result);
@@ -592,12 +970,13 @@ export class ErpService {
       if (action === 'reversal') evidence.reversalDecision = result;
       if (action === 'settlement' || action === 'delivery_and_receipt') evidence.allocationDecision = input;
       this.#db.prepare('INSERT INTO audit_events VALUES (?, ?)').run(context.operationId, JSON.stringify(evidence));
-      this.#beforeCommit?.();
-      this.#db.exec('COMMIT');
+      this.#followups.refresh(now, context.actorId);
+      if (ownsTransaction) this.#beforeCommit?.();
+      if (ownsTransaction) this.#db.exec('COMMIT');
       return result;
     } catch (error) {
-      if (this.#db.isTransaction) this.#db.exec('ROLLBACK');
-      if (error && typeof error === 'object' && 'errcode' in error && (Number(error.errcode) & 255) === 5)
+      if (ownsTransaction && this.#db.isTransaction) this.#db.exec('ROLLBACK');
+      if (error && typeof error === 'object' && 'errcode' in error && [5, 6].includes(Number(error.errcode) & 255))
         throw new BusinessError('busy', 'ERP is busy; retry the same confirmed operation');
       throw error;
     }
@@ -632,7 +1011,7 @@ export class ErpService {
         valueCents = add(valueCents, ratio(BigInt(entry.value_cents as string)));
       }
     }
-    for (const entry of this.listReversals().flatMap(r => r.stock)) {
+    for (const entry of [...this.listReversals(), ...this.listReturns(), ...this.listInventoryOperations()].flatMap(r => r.stock)) {
       if (entry.productId !== productId || entry.warehouseId !== warehouseId) continue;
       quantity = add(quantity, entry.quantity); valueCents = add(valueCents, entry.valueCents);
     }
@@ -643,7 +1022,7 @@ export class ErpService {
     const rows = supplierId === undefined
       ? this.#db.prepare('SELECT * FROM payable_ledger ORDER BY rowid').all()
       : this.#db.prepare('SELECT * FROM payable_ledger WHERE supplier_id = ? ORDER BY rowid').all(supplierId);
-    for (const row of rows) row.amount_cents = String(BigInt(row.amount_cents as string) - this.#allocated(row.receipt_id as string));
+    for (const row of rows) row.amount_cents = String(BigInt(row.amount_cents as string) - this.#allocated(row.receipt_id as string) - this.#returnedAmount(row.receipt_id as string));
     return rows.filter(row => !this.#isReversed(row.receipt_id as string, 'purchase') && BigInt(row.amount_cents as string) > 0n).map(row => ({ receiptId: row.receipt_id as string,
       supplierId: row.supplier_id as string, openCents: row.amount_cents as string, currency: 'CNY' }));
   }

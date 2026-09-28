@@ -178,7 +178,7 @@ test('ERP settlement: schema 2 upgrades in place preserving existing obligations
   const delivery = f.service.confirmDelivery(f.delivery(), c('d'));
   f.close();
   const old = new DatabaseSync(f.path);
-  old.exec('DROP TABLE reversals; DROP TABLE product_followups; DROP TABLE pack_versions; DROP TABLE product_details; DROP TABLE settlement_allocations; DROP TABLE settlements; PRAGMA user_version = 2;');
+  old.exec('DROP TABLE inventory_operations; DROP TABLE stocktakes; DROP TABLE return_refunds; DROP TABLE quarantine_resolutions; DROP TABLE quarantines; DROP TABLE returns; DROP TABLE reversals; DROP TABLE product_followups; DROP TABLE pack_versions; DROP TABLE product_details; DROP TABLE settlement_allocations; DROP TABLE settlements; DROP TABLE operation_drafts; DROP TABLE draft_events; DROP TABLE notification_events; DROP TABLE followup_history; DROP TABLE followups; PRAGMA user_version = 2;');
   old.close();
   // Reopen the same database directly; the prior handle is already closed.
   const upgraded = new ErpService(f.path);
