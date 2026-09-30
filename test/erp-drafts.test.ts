@@ -26,7 +26,7 @@ function setup(t: TestContext) {
     time(value: string) { now = value; },
     stock() { return s.getStock(p.id, w.id); }, fail(value: boolean) { fail = value; },
     reopen(migrate = false) { s.close(); if (migrate) { const db = new DatabaseSync(path);
-      db.exec('DROP TABLE operation_drafts; DROP TABLE draft_events; PRAGMA user_version = 8;'); db.close(); } s = new ErpService(path, { clock: () => new Date(now) }); },
+      db.exec('DROP TABLE operation_drafts; DROP TABLE draft_events; DROP TABLE hermes_events; DROP TABLE hermes_displays; DROP TABLE web_auth; DROP TABLE web_security_events; PRAGMA user_version = 8;'); db.close(); } s = new ErpService(path, { clock: () => new Date(now) }); },
   };
 }
 test('ERP drafts: preview has no business effects; correction replaces version; plain confirmation posts latest once', t => {

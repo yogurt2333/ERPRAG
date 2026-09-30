@@ -125,6 +125,9 @@ const resolutionSchema = object({ quarantineId: text, reason: text, outcome: Typ
   object({ kind: Type.Literal('linked_return'), originId: text, lineIndex: Type.Integer({ minimum: 0, maximum: 499 }),
     condition: returnSchema.properties.condition }),
   object({ kind: Type.Literal('return_to_sender') }), object({ kind: Type.Literal('confirmed_loss') }) ]) });
+const refundSchema = object({ originId: text, kind: returnKind, amountCents: centsSchema, reason: text });
+const followupDecisionSchema = object({ id: text, status: Type.Union([Type.Literal('resolved'), Type.Literal('deferred'), Type.Literal('ignored')]),
+  reason: text, until: Type.Optional(text) });
 export interface PostedReturn extends Static<typeof returnSchema> {
   id: string; actorId: string; channel: Confirmation['channel']; confirmationId: string; postedAt: string;
   partyId: string; productId: string; warehouseId: string; amountCents: string; originalCostCents: Rational;
@@ -138,6 +141,18 @@ export interface QuarantineResolution extends Static<typeof resolutionSchema> { 
 export interface ReturnRefund { id: string; originId: string; kind: 'sale' | 'purchase'; amountCents: string;
   reason: string; postedAt: string; direction: 'outgoing' | 'incoming' }
 export interface AuditEvidence extends Confirmation { action: string; recordId: string; recordedAt: string; allocationDecision?: unknown; reversalDecision?: unknown; draftVersion?: number; conversationId?: string }
+/** Public input descriptions reuse domain validators; no client-computed balances. */
+export const operationSchemas = {
+  product: productSchema, supplier: namedSchema, customer: namedSchema, warehouse: namedSchema,
+  product_details: detailsSchema, pack_unit: packSchema, purchase_receipt: purchaseSchema,
+  sales_order: orderSchema, change_sales_order: orderChangeSchema, cancel_sales_order: cancelSchema,
+  delivery: deliverySchema, delivery_and_receipt: combinedSchema, settlement: settlementSchema,
+  allocated_settlement: settlementConfirmationSchema, reversal: reversalSchema, return: returnSchema,
+  quarantine_return: quarantineSchema, resolve_quarantine: resolutionSchema,
+  return_refund: refundSchema,
+  stocktake: stocktakeSchema, resolve_stocktake: stocktakeResolutionSchema, transfer: transferSchema, loss: lossSchema,
+  followup_decision: followupDecisionSchema,
+};
 export class BusinessError extends Error {
   readonly code: 'invalid_input' | 'not_found' | 'idempotency_conflict' | 'busy' | 'conflict' | 'insufficient_stock';
   constructor(code: BusinessError['code'], message: string) {
@@ -181,6 +196,14 @@ export class ErpService {
   handleDraft(context: DraftContext, action: DraftAction) {
     return new DraftStore(this.#db, (command, confirmation) => this.#executeDraft(command, confirmation),
       () => this.#draftSnapshot(), () => this.#beforeCommit?.(), this.#clock).handle(context, action);
+  }
+  currentWebDraft(actorId: string, conversationId: string) {
+    return this.currentDraft(actorId, 'web', conversationId);
+  }
+  currentDraft(actorId: string, channel: Confirmation['channel'], conversationId: string): import('./drafts.ts').OperationDraft | null {
+    const row = this.#db.prepare('SELECT document FROM operation_drafts WHERE scope = ? ORDER BY version DESC LIMIT 1')
+      .get(JSON.stringify([actorId, channel, conversationId]));
+    return row ? JSON.parse(String(row.document)) : null;
   }
   #executeDraft(command: DraftCommand, confirmation: Confirmation): unknown {
     if (!command || typeof command.kind !== 'string' || Object.keys(command).some(k => !['kind', 'input'].includes(k)))
@@ -227,9 +250,10 @@ export class ErpService {
   listFollowups() { return this.#followups.list(); }
   listFollowupHistory() { return this.#followups.history(); }
   listNotifications() { return this.#followups.events(); }
+  pendingNotifications() { return this.#followups.pending(); }
+  acknowledgeNotification(id: string) { this.#followups.ack(id); }
   decideFollowup(raw: unknown, confirmation: unknown) {
-    const input = validate(object({ id: text, status: Type.Union([Type.Literal('resolved'), Type.Literal('deferred'), Type.Literal('ignored')]),
-      reason: text, until: Type.Optional(text) }), raw);
+    const input = validate(followupDecisionSchema, raw);
     return this.#post('followup_decision', input, confirmation, (context, now) =>
       this.#followups.decide(input as FollowupDecision, now, context));
   }
@@ -766,7 +790,7 @@ export class ErpService {
     return { amountCents: String((credit > 0n ? credit : 0n) - paidRefunds), direction: input.kind === 'sale' ? 'outgoing' : 'incoming' };
   }
   confirmReturnRefund(raw: unknown, confirmation: unknown): ReturnRefund {
-    const input = validate(object({ originId: text, kind: returnKind, amountCents: centsSchema, reason: text }), raw);
+    const input = validate(refundSchema, raw);
     return this.#post('return_refund', input, confirmation, (context, now) => {
       const balance = this.getReturnRefundBalance({ originId: input.originId, kind: input.kind });
       if (BigInt(input.amountCents) <= 0n || BigInt(input.amountCents) > BigInt(balance.amountCents))

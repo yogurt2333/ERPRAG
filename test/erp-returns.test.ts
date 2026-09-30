@@ -29,7 +29,7 @@ function fixture(t: TestContext) {
     fail(value: boolean) { fail = value; },
     reopen(asV5 = false) { s.close(); if (asV5) {
       const db = new DatabaseSync(path);
-      db.exec('DROP TABLE inventory_operations; DROP TABLE stocktakes; DROP TABLE return_refunds; DROP TABLE quarantine_resolutions; DROP TABLE quarantines; DROP TABLE returns; DROP TABLE operation_drafts; DROP TABLE draft_events; DROP TABLE notification_events; DROP TABLE followup_history; DROP TABLE followups; PRAGMA user_version = 5;');
+      db.exec('DROP TABLE inventory_operations; DROP TABLE stocktakes; DROP TABLE return_refunds; DROP TABLE quarantine_resolutions; DROP TABLE quarantines; DROP TABLE returns; DROP TABLE operation_drafts; DROP TABLE draft_events; DROP TABLE notification_events; DROP TABLE followup_history; DROP TABLE followups; DROP TABLE hermes_events; DROP TABLE hermes_displays; DROP TABLE web_auth; DROP TABLE web_security_events; PRAGMA user_version = 5;');
       db.close();
     } s = new ErpService(path); },
     quarantine(id = 'q', n = 1n) { return s.receiveQuarantinedReturn({ customerId: customer.id, productId: product.id, warehouseId: warehouse.id,

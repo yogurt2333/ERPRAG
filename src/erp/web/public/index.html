@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#174e43"><title>分销 ERP · 日常业务</title><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" href="/icon.svg"><link rel="stylesheet" href="/style.css"><script defer src="/webauthn.js"></script><script defer src="/app.js"></script></head>
+<body><header><div><small>日常经营工作台</small><h1>分销 ERP</h1></div><span id="identity">请使用通行密钥登录</span></header>
+<main><p id="notice" role="status" aria-live="polite"></p>
+<section id="login"><h2>安全登录</h2><p>使用手机、电脑或安全密钥上的 Passkey。无需模型或聊天服务。</p><button id="signin">使用 Passkey 登录</button>
+<details><summary>首次启用 / 接受邀请</summary><label>一次性注册凭证<input id="grant" type="password" autocomplete="off"></label><button id="enroll">注册 Passkey</button></details>
+<details><summary>设备丢失，使用离线恢复码</summary><p>恢复码只能使用一次。验证后需注册新的 Passkey；旧凭据将在注册成功后失效。</p><label>恢复码<input id="recovery" type="password" autocomplete="off"></label><button id="recover">恢复并注册新 Passkey</button></details></section>
+<section id="secrets" hidden><h2>请离线保存</h2><p>恢复码或邀请凭证只在本次显示。请保存在安全的离线位置，离开前关闭此区域。</p><pre id="secretText"></pre><button id="hideSecrets">已保存，关闭显示</button></section>
+<div id="workspace" hidden><nav aria-label="业务区域"><button data-tab="operate">办理业务</button><button data-tab="records">业务记录</button><button data-tab="security">账户安全</button><button id="refresh">刷新</button><button id="logout">退出</button></nav>
+<section id="operate"><div class="split"><div><h2>新建业务草稿</h2><p>金额以人民币分填写，数量使用商品单位。预览不会过账。</p><label>业务类型<select id="operation"></select></label><form id="businessForm"><div id="fields"></div><button type="submit">生成影响预览</button></form></div>
+<aside><h2>确认前核对</h2><p id="draftStatus">暂无草稿</p><div id="impact"></div><div class="actions"><button id="confirm" disabled>确认过账</button><button id="cancel" disabled>取消草稿</button><button id="retry" hidden>重试上一次请求</button></div></aside></div></section>
+<section id="records" hidden><h2>业务记录</h2><label>查看类别<select id="recordKind"></select></label><p>保质期日期是管理估计值；金额以分、精确分数显示。</p><div id="recordList"></div></section>
+<section id="security" hidden><h2>账户安全</h2><p>管理操作需要最近 5 分钟内完成 Passkey 验证。建议至少注册两个独立设备上的凭据。</p><button id="reauth">重新验证 Passkey</button><button id="backup">添加备用 Passkey</button><button id="codes">重新生成恢复码</button><button id="revoke">退出所有设备</button><h3>已注册凭据</h3><div id="credentials"></div><details><summary>邀请第二位操作员（权限相同）</summary><label>操作员名称<input id="operatorName" maxlength="100"></label><button id="invite">生成十分钟邀请凭证</button></details></section></div>
+</main><footer>所有业务写入均先预览、再确认。离线时停止提交，不缓存业务数据。</footer></body></html>

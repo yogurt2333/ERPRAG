@@ -4,6 +4,13 @@
 > ERP 其余功能仍待实现，两套上下文的测试证据分别记录。参见
 > [上下文地图](CONTEXT-MAP.md)与[轻量 ERP MVP 设计](docs/lean-erp/MVP-DESIGN.md)。
 
+轻量 ERP 已提供 Passkey 保护的 Web/PWA 和 24 种草稿表单，可独立于 Hermes/模型办理业务。
+启动、首次注册与恢复步骤见 [Web/PWA 使用说明](docs/lean-erp/WEB-PASSKEYS.md)。
+工单 11 已加入 Hermes 微信草稿桥接、消息幂等和通知发送器，通过本地脚本验证；
+真实微信验收尚待联调。见 [Hermes 接入说明](docs/lean-erp/HERMES-WECHAT.md)。
+已通过本地 HTTP 契约与 Chromium 虚拟认证器验证，并完成 ECS HTTPS 试运行部署；
+真实设备、长期资源容量与备份恢复仍待验证。参见 [小内存部署说明](deploy/lean-erp/README.md)。
+
 轻量 ERP：`npm run demo:erp` 运行合成采购、部分交货及收付款演示，`npm run test:erp` 验证真实
 临时 SQLite 数据库上的业务行为。接口、数值约定与当前范围见
 [采购入库使用说明](docs/lean-erp/PURCHASE-RECEIPT.md)、[订单交货使用说明](docs/lean-erp/SALES-DELIVERY.md)

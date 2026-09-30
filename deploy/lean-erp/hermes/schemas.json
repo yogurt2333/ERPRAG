@@ -1,0 +1,361 @@
+{
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "kind",
+        "input"
+      ],
+      "properties": {
+        "kind": {
+          "const": "purchase_receipt",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "supplierId",
+            "warehouseId",
+            "lines"
+          ],
+          "properties": {
+            "supplierId": {
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "warehouseId": {
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "dueDate": {
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+              "type": "string"
+            },
+            "lines": {
+              "minItems": 1,
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "productId",
+                  "unit",
+                  "quantity",
+                  "amountCents"
+                ],
+                "properties": {
+                  "productId": {
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "\\S",
+                    "type": "string"
+                  },
+                  "unit": {
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "\\S",
+                    "type": "string"
+                  },
+                  "quantity": {
+                    "pattern": "^(0|[1-9][0-9]{0,17})(\\.[0-9]{1,6})?$",
+                    "type": "string"
+                  },
+                  "amountCents": {
+                    "pattern": "^(0|[1-9][0-9]{0,17})$",
+                    "type": "string"
+                  },
+                  "packVersion": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "earliestProductionDate": {
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "kind",
+        "input"
+      ],
+      "properties": {
+        "kind": {
+          "const": "sales_order",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "customerId",
+            "warehouseId",
+            "lines"
+          ],
+          "properties": {
+            "customerId": {
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "warehouseId": {
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "lines": {
+              "minItems": 1,
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "productId",
+                  "unit",
+                  "quantity",
+                  "amountCents"
+                ],
+                "properties": {
+                  "productId": {
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "\\S",
+                    "type": "string"
+                  },
+                  "unit": {
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "\\S",
+                    "type": "string"
+                  },
+                  "quantity": {
+                    "pattern": "^(0|[1-9][0-9]{0,17})(\\.[0-9]{1,6})?$",
+                    "type": "string"
+                  },
+                  "amountCents": {
+                    "pattern": "^(0|[1-9][0-9]{0,17})$",
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "kind",
+        "input"
+      ],
+      "properties": {
+        "kind": {
+          "const": "delivery",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "orderId",
+            "expectedRevision",
+            "lines"
+          ],
+          "properties": {
+            "orderId": {
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "expectedRevision": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "dueDate": {
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+              "type": "string"
+            },
+            "lines": {
+              "minItems": 1,
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "orderLineIndex",
+                  "quantity",
+                  "amountCents"
+                ],
+                "properties": {
+                  "orderLineIndex": {
+                    "minimum": 0,
+                    "maximum": 499,
+                    "type": "integer"
+                  },
+                  "quantity": {
+                    "pattern": "^(0|[1-9][0-9]{0,17})(\\.[0-9]{1,6})?$",
+                    "type": "string"
+                  },
+                  "amountCents": {
+                    "pattern": "^(0|[1-9][0-9]{0,17})$",
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "kind",
+        "input"
+      ],
+      "properties": {
+        "kind": {
+          "const": "delivery_and_receipt",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "delivery",
+            "amountCents"
+          ],
+          "properties": {
+            "delivery": {
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "orderId",
+                "expectedRevision",
+                "lines"
+              ],
+              "properties": {
+                "orderId": {
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "expectedRevision": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "dueDate": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": "string"
+                },
+                "lines": {
+                  "minItems": 1,
+                  "maxItems": 5,
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": [
+                      "orderLineIndex",
+                      "quantity",
+                      "amountCents"
+                    ],
+                    "properties": {
+                      "orderLineIndex": {
+                        "minimum": 0,
+                        "maximum": 499,
+                        "type": "integer"
+                      },
+                      "quantity": {
+                        "pattern": "^(0|[1-9][0-9]{0,17})(\\.[0-9]{1,6})?$",
+                        "type": "string"
+                      },
+                      "amountCents": {
+                        "pattern": "^(0|[1-9][0-9]{0,17})$",
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "amountCents": {
+              "pattern": "^(0|[1-9][0-9]{0,17})$",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "kind",
+        "input"
+      ],
+      "properties": {
+        "kind": {
+          "const": "settlement",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "kind",
+            "partyId",
+            "amountCents"
+          ],
+          "properties": {
+            "kind": {
+              "anyOf": [
+                {
+                  "const": "customer_receipt",
+                  "type": "string"
+                },
+                {
+                  "const": "supplier_payment",
+                  "type": "string"
+                }
+              ]
+            },
+            "partyId": {
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "amountCents": {
+              "pattern": "^(0|[1-9][0-9]{0,17})$",
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

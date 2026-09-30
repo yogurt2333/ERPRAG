@@ -6,7 +6,7 @@ export function openDatabase(path: string): DatabaseSync {
     db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     db.exec('BEGIN IMMEDIATE');
     const version = db.prepare('PRAGMA user_version').get()!.user_version;
-    if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9].includes(Number(version))) throw new Error(`Unsupported ERP schema version: ${version}`);
+    if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(Number(version))) throw new Error(`Unsupported ERP schema version: ${version}`);
     if (version === 0) db.exec(`
       CREATE TABLE masters (
         id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('product','supplier','warehouse')),
@@ -140,6 +140,19 @@ export function openDatabase(path: string): DatabaseSync {
       CREATE TABLE draft_events (scope TEXT NOT NULL, event_id TEXT NOT NULL, request TEXT NOT NULL, result TEXT NOT NULL,
         PRIMARY KEY(scope, event_id)) STRICT;
       PRAGMA user_version = 9;
+    `);
+    if (Number(version) < 10) db.exec(`
+      CREATE TABLE web_auth (kind TEXT NOT NULL, id TEXT NOT NULL, document TEXT NOT NULL,
+        PRIMARY KEY(kind, id)) STRICT;
+      CREATE TABLE web_security_events (id INTEGER PRIMARY KEY, document TEXT NOT NULL) STRICT;
+      PRAGMA user_version = 10;
+    `);
+    if (Number(version) < 11) db.exec(`
+      CREATE TABLE hermes_events (scope TEXT NOT NULL, event_id TEXT NOT NULL, document TEXT NOT NULL,
+        PRIMARY KEY(scope, event_id)) STRICT;
+      CREATE INDEX hermes_pending ON hermes_events(scope) WHERE json_extract(document, '$.state') != 'done';
+      CREATE TABLE hermes_displays (scope TEXT PRIMARY KEY, version INTEGER NOT NULL) STRICT;
+      PRAGMA user_version = 11;
     `);
     db.exec('COMMIT');
     return db;

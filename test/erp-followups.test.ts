@@ -14,7 +14,7 @@ function fixture(t: TestContext) {
   let s = new ErpService(path, options);
   t.after(() => { s.close(); rmSync(dir, { recursive: true, force: true }); });
   return { get s() { return s; }, path, at(value: string) { now = value; }, fail(value: boolean) { fail = value; },
-    reopen(old = false) { s.close(); if (old) { const db = new DatabaseSync(path); db.exec('DROP TABLE operation_drafts; DROP TABLE draft_events; DROP TABLE notification_events; DROP TABLE followup_history; DROP TABLE followups; PRAGMA user_version=7'); db.close(); } s = new ErpService(path, options); } };
+    reopen(old = false) { s.close(); if (old) { const db = new DatabaseSync(path); db.exec('DROP TABLE operation_drafts; DROP TABLE draft_events; DROP TABLE notification_events; DROP TABLE followup_history; DROP TABLE followups; DROP TABLE hermes_events; DROP TABLE hermes_displays; DROP TABLE web_auth; DROP TABLE web_security_events; PRAGMA user_version =7'); db.close(); } s = new ErpService(path, options); } };
 }
 test('ERP followups: immediate event is atomic, durable, attributed and idempotent', t => {
   const f = fixture(t); f.fail(true);

@@ -1,0 +1,18 @@
+[Unit]
+Description=Renew Lean ERP HTTPS certificate
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/lean-erp/tls/fullchain.pem
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStartPre=/bin/bash /opt/lean-erp/ops/check-memory.sh 640
+ExecStart=/bin/sh /opt/lean-erp/acme/acme.sh --cron --home /opt/lean-erp/acme --config-home /var/lib/lean-erp-acme-account --cert-home /var/lib/lean-erp-acme-account/certs --server letsencrypt
+MemoryMax=64M
+CPUQuota=25%
+Nice=10
+OOMScoreAdjust=500
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=300

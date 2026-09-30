@@ -29,7 +29,7 @@ function fixture(t: TestContext) {
       lines: [{ productId: p.id, unit: '瓶', quantity: '1', amountCents: '60' }] }, c('order')); },
     fail(value: boolean) { fail = value; },
     reopen(v6 = false) { s.close(); if (v6) { const db = new DatabaseSync(path);
-      db.exec('DROP TABLE inventory_operations; DROP TABLE stocktakes; DROP TABLE operation_drafts; DROP TABLE draft_events; DROP TABLE notification_events; DROP TABLE followup_history; DROP TABLE followups; PRAGMA user_version = 6;'); db.close(); }
+      db.exec('DROP TABLE inventory_operations; DROP TABLE stocktakes; DROP TABLE operation_drafts; DROP TABLE draft_events; DROP TABLE notification_events; DROP TABLE followup_history; DROP TABLE followups; DROP TABLE hermes_events; DROP TABLE hermes_displays; DROP TABLE web_auth; DROP TABLE web_security_events; PRAGMA user_version = 6;'); db.close(); }
       s = new ErpService(path); }
   };
 }

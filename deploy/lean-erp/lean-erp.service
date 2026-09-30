@@ -1,0 +1,36 @@
+[Unit]
+Description=Lean ERP Web and Passkey service
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=lean-erp
+Group=lean-erp
+WorkingDirectory=/opt/lean-erp/current
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/lean-erp/environment
+ExecStartPre=/bin/bash /opt/lean-erp/ops/check-memory.sh 768
+ExecStart=/opt/lean-erp/node/bin/node --max-old-space-size=64 src/erp/web/main.ts
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lean-erp
+RestrictSUIDSGID=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+MemoryMax=192M
+CPUQuota=50%
+Nice=10
+OOMScoreAdjust=500
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

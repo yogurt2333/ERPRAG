@@ -5,6 +5,9 @@ dist/
 !.env.example
 private/
 artifacts/
+.scratch/hermes-source/
+.scratch/hermes-erp-plugin.tar.gz
+.scratch/lean-erp-wechat-runtime.tar.gz
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
